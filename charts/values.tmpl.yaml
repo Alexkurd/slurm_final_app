@@ -1,0 +1,88 @@
+app:
+  replicaCount: 2
+  image: yelb-appserver
+  tag: latest
+
+image:
+  repository: cr.yandex/${TF_VAR_yc_registry_id}
+  pullPolicy: Always
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+ingress:
+  enabled: true
+  annotations:
+    kubernetes.io/ingress.class: nginx
+  defaultBackend:
+    address: yelb-appserver
+    name: yelb-appserver
+    host: yelb-appserver
+    port: 4587
+  path: /
+  hosts:
+    - api.s041120.tech
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+### Use reserved IP from Terraform state.
+ingress-nginx:
+  controller:
+    service:
+      loadBalancerIP: ${TF_VAR_LB_IP}
+
+### Postgresql_managed Master IP for yelb.db
+postgresql:
+  master_ip: ${TF_VAR_pg_host}
+
+env_configmap:
+  values:
+    YELB_DB_NAME: ${TF_VAR_pg_dbname}
+    YELB_DB_USER: ${TF_VAR_pg_user}
+    YELB_DB_PASSWORD: ${TF_VAR_pg_password}
+    YELB_DB_PORT: "6432"

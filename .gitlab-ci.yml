@@ -1,0 +1,123 @@
+stages:
+  - test
+  - build
+  - deploy
+
+image: docker:20.10.16
+
+variables:
+  DOCKER_DRIVER: overlay2
+  REGISTRY_TOKEN: $TF_VAR_yc_token
+  REGISTRY_ID: $TF_VAR_yc_registry_id
+
+build-app-job:
+  stage: build
+  services:
+    - docker:dind
+  before_script:
+    - docker login --username oauth --password ${REGISTRY_TOKEN} cr.yandex
+  script:
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH" ]]; then
+        tag=""
+        echo "Running on default branch '$CI_DEFAULT_BRANCH': tag = 'latest'"
+      else
+        tag=":$CI_COMMIT_REF_SLUG"
+        echo "Running on branch '$CI_COMMIT_BRANCH': tag = $tag"
+      fi
+    - cd yelb-appserver/ && docker build ./ -t cr.yandex/${REGISTRY_ID}/yelb-appserver${tag} -t commithash:${CI_COMMIT_SHA:0:8} && docker push cr.yandex/$REGISTRY_ID/yelb-appserver${tag}
+#  only:
+#    changes:
+#      - "yelb-appserver/*"
+#  when: manual
+
+build-ui-job:
+  stage: build
+  services:
+    - docker:dind
+  before_script:
+    - docker login --username oauth --password $REGISTRY_TOKEN cr.yandex
+  script:
+    - cd yelb-ui/ && docker build ./ -t cr.yandex/$REGISTRY_ID/yelb-ui${tag} && docker push cr.yandex/$REGISTRY_ID/yelb-ui${tag}
+#  only:
+#    changes:
+#      - "yelb-ui/*"
+  when: manual # ~8 mins
+
+lint-test-job:
+  stage: test
+  image:
+    name: alpine/helm:3.9.0
+    entrypoint: [""]
+  script:
+    - cd charts/ && helm lint
+
+deploy-ui-s3:
+  image: bentolor/docker-dind-awscli
+  variables:
+    s3_address: "s041120.tech"
+    api_address: "api.s041120.tech"
+    AWS_ACCESS_KEY_ID: $s3_sa_id
+    AWS_SECRET_ACCESS_KEY: $s3_sa_key
+    AWS_DEFAULT_REGION: ru-central1
+  stage: deploy
+  services:
+    - docker:dind
+  before_script:
+    - docker login --username oauth --password $REGISTRY_TOKEN cr.yandex
+  dependencies:
+    - build-ui-job
+  script:
+    - docker create -ti --privileged --name dummy cr.yandex/$REGISTRY_ID/yelb-ui${tag} bash
+    - docker cp dummy:/clarity-seed/ /clarity-seed/
+    - cd /clarity-seed/prod/dist/
+    - sed -i "s/yelb-appserver-endpoint-whatever-that-is.com/${api_address}/" ./env.js
+    - cat ./env.js
+    - aws --endpoint-url=https://storage.yandexcloud.net/ s3 cp --recursive ./ s3://${s3_address}/
+    - docker rm -f dummy
+
+deploy-app-k8s:
+  stage: deploy
+  image:
+    name: alpine/helm:3.9.0
+    entrypoint: [""]
+  variables:
+    TF_VAR_yc_registry_id: ${TF_VAR_yc_registry_id}
+    TF_VAR_LB_IP: ${TF_VAR_LB_IP}
+    TF_VAR_pg_host: ${TF_VAR_pg_host}
+    TF_VAR_pg_dbname: ${TF_VAR_pg_dbname}
+    TF_VAR_pg_user: ${TF_VAR_pg_user}
+    TF_VAR_pg_password: ${TF_VAR_pg_password}
+  before_script:
+    - apk add gettext bash curl
+    - curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+    - echo "$yc_config" > ~/.config/yandex-cloud/config.yaml
+    - export PATH="$PATH:/root/yandex-cloud/bin"
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - chmod +x ./kubectl && mv ./kubectl /usr/local/bin/kubectl
+    - yc managed-kubernetes cluster get-credentials --name s041120 --external --force
+    #- mkdir ~/.kube/ && echo "$kubeconfig" > ~/.kube/config
+  script:
+    - envsubst < ./charts/values.tmpl.yaml > ./charts/values.yaml
+    - helm upgrade yelb ./charts --install --atomic -f ./charts/values.yaml
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'master'
+      when: manual
+
+deploy-db-data:
+  stage: deploy
+  image:
+    name: "ubuntu:focal"
+    #entrypoint: ['']
+  variables:
+    PGHOST: $TF_VAR_pg_host
+    PGDATABASE: $TF_VAR_pg_dbname
+    PGPASSWORD: $TF_VAR_pg_password
+    PGUSER: $TF_VAR_pg_user
+    PGPORT: 6432 #cluster external fixed
+  script:
+    - cd yelb-db/
+    - chmod +x init-yelb-db.sh && chmod +x deploy.sh
+    - sh deploy.sh
+    - sh init-yelb-db.sh
+  when: manual
